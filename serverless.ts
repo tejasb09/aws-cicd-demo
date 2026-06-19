@@ -8,7 +8,9 @@ const serviceName = process.env.SERVICE_NAME ?? 'nn-aws-cicd-demo';
 // Lambda execution runtime — matches the Node 24 local toolchain (see .nvmrc).
 // Override per environment with NODE_RUNTIME (e.g. nodejs22.x) if a region ever
 // lacks nodejs24.x; the esbuild `target` below is derived from this automatically.
-const nodeRuntime = (process.env.NODE_RUNTIME ?? 'nodejs24.x') as NonNullable<AWS['provider']['runtime']>;
+// Use `||` (not `??`) so an empty NODE_RUNTIME (e.g. an unset GitHub Environment
+// var, which expands to "") falls back to the default instead of an invalid "".
+const nodeRuntime = (process.env.NODE_RUNTIME || 'nodejs24.x') as NonNullable<AWS['provider']['runtime']>;
 const esbuildTarget = nodeRuntime.replace('nodejs', 'node').replace('.x', '');
 
 // serverless-iam-roles-per-function augments each function with these optional fields.
