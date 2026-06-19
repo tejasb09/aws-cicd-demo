@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "Node16",
+    "moduleResolution": "node16",
+    "lib": ["ES2023"],
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "types": ["node", "vitest/globals"],
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts", "resources/**/*.ts", "serverless.ts", "test/**/*.ts", "global.d.ts"]
+}

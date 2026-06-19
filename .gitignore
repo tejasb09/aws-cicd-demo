@@ -1,0 +1,38 @@
+# package directories
+node_modules
+jspm_packages
+
+# Serverless directories
+.serverless
+tsconfig.serverless.json
+
+# esbuild directories
+.esbuild
+
+# bun local cache/tmp (only created if you override BUN_INSTALL_CACHE_DIR/BUN_TMPDIR)
+.bun-cache
+.bun-tmp
+
+# Build
+.build
+build
+dist
+
+# test coverage
+coverage
+
+# logs
+*.log
+yarn-error.log
+
+# env files (never commit real secrets/config)
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+.tsbuildinfo.lambda

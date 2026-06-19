@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  GitHub Actions OIDC deploy role for the aws-serverless-template service.
+  Creates (optionally) the account-wide GitHub OIDC identity provider and an IAM
+  role that GitHub Actions can assume via short-lived, federated credentials —
+  no long-lived AWS access keys. The role's trust policy scopes WHICH GitHub
+  repo / branch / environment may assume it (see the SubjectClaim parameters).
+
+# ---------------------------------------------------------------------------
+# Deploy this ONCE per AWS account/region, before the first GitHub deploy:
+#
+#   aws cloudformation deploy \
+#     --template-file infra/github-oidc-role.yaml \
+#     --stack-name <service>-github-oidc \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       GitHubOrg=my-org \
+#       GitHubRepo=my-repo \
+#       GitHubEnvironment=dev \
+#       ServiceNamePrefix=aws-serverless-template
+#
+# Then copy the DeployRoleArn output into the GitHub *Environment* secret
+# AWS_DEPLOY_ROLE_ARN that .github/workflows/deploy.yml reads.
+# ---------------------------------------------------------------------------
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: GitHub organisation or user that owns the repo (the "owner" in owner/repo).
+
+  GitHubRepo:
+    Type: String
+    Default: '*'
+    Description: >-
+      Repository name to trust. Use a single repo name to scope tightly, or "*"
+      to trust every repo in the org (broad — not recommended).
+
+  GitHubEnvironment:
+    Type: String
+    Default: '*'
+    Description: >-
+      GitHub Environment to scope to (matches deploy.yml's `environment:`).
+      Leave as "*" to allow any branch/environment in the repo. Set to e.g.
+      "prod" to only allow the prod Environment to assume this role.
+
+  ServiceNamePrefix:
+    Type: String
+    Default: aws-serverless-template
+    Description: >-
+      The Serverless `service` name. Deploy permissions below are scoped to
+      resources whose names start with "<prefix>-".
+
+  CreateOIDCProvider:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Create the account-wide GitHub OIDC provider. Set to "false" if one
+      already exists in this account (only one is allowed per account).
+
+  RoleName:
+    Type: String
+    Default: aws-serverless-template-github-deploy
+    Description: Name of the IAM role GitHub Actions will assume.
+
+Conditions:
+  ShouldCreateOIDCProvider: !Equals [!Ref CreateOIDCProvider, 'true']
+  ScopeToEnvironment: !Not [!Equals [!Ref GitHubEnvironment, '*']]
+
+Resources:
+  # Account-wide identity provider for GitHub Actions tokens. Only ONE of these
+  # can exist per AWS account — set CreateOIDCProvider=false to reuse an existing one.
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # GitHub's certificate thumbprints. AWS validates the provider TLS chain
+      # against trusted CAs and effectively ignores these now, but the property
+      # is still required by CloudFormation.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fce
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: !Sub 'GitHub Actions OIDC deploy role for ${ServiceNamePrefix}.'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOIDCProvider
+                - !Ref GitHubOIDCProvider
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              # This is the line that scopes the role to a repo / environment.
+              StringLike:
+                token.actions.githubusercontent.com:sub: !If
+                  - ScopeToEnvironment
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:environment:${GitHubEnvironment}'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:*'
+      Policies:
+        - PolicyName: ServerlessDeployPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudFormation — Serverless Framework drives the deploy through CFN.
+              - Sid: CloudFormation
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:ListStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ServiceNamePrefix}-*/*'
+              - Sid: CloudFormationValidate
+                Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                Resource: '*'
+
+              # S3 — the Serverless deployment bucket (holds zipped artifacts/templates).
+              - Sid: DeploymentBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutBucketAcl
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ServiceNamePrefix}-*'
+                  - !Sub 'arn:aws:s3:::${ServiceNamePrefix}-*/*'
+
+              # Lambda functions for this service.
+              - Sid: Lambda
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListVersionsByFunction
+                  - lambda:PublishVersion
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:CreateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                  - lambda:GetEventSourceMapping
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ServiceNamePrefix}-*'
+
+              # IAM — per-function execution roles (serverless-iam-roles-per-function).
+              - Sid: IamRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ServiceNamePrefix}-*'
+              - Sid: IamPassRole
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ServiceNamePrefix}-*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+
+              # CloudWatch Logs — Lambda log groups + retention.
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ServiceNamePrefix}-*'
+
+              # API Gateway — HTTP API. Its ARNs don't support useful resource scoping,
+              # so these actions are account-wide in this region.
+              - Sid: ApiGateway
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:POST
+                  - apigateway:PUT
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                Resource:
+                  - !Sub 'arn:aws:apigateway:${AWS::Region}::/*'
+
+              # DynamoDB — the service's tables.
+              - Sid: DynamoDB
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DeleteTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:DescribeContinuousBackups
+                  - dynamodb:UpdateContinuousBackups
+                  - dynamodb:UpdateTable
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - dynamodb:ListTagsOfResource
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ServiceNamePrefix}-*'
+
+              # Secrets Manager — the service's secret containers (values seeded separately).
+              - Sid: SecretsManager
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:UntagResource
+                  - secretsmanager:GetResourcePolicy
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ServiceNamePrefix}-*'
+
+Outputs:
+  DeployRoleArn:
+    Description: >-
+      Set this as the GitHub Environment secret AWS_DEPLOY_ROLE_ARN used by
+      .github/workflows/deploy.yml.
+    Value: !GetAtt DeployRole.Arn
+
+  OIDCProviderArn:
+    Description: ARN of the GitHub OIDC provider used by the role.
+    Value: !If
+      - ShouldCreateOIDCProvider
+      - !Ref GitHubOIDCProvider
+      - !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+
+  TrustedSubject:
+    Description: The GitHub OIDC subject pattern this role trusts.
+    Value: !If
+      - ScopeToEnvironment
+      - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:environment:${GitHubEnvironment}'
+      - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:*'
